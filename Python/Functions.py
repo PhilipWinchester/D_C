@@ -9,8 +9,8 @@ import numpy as np
 import pandas as pd
 import json
 import datetime
-from scipy.stats import poisson,skellam
-from scipy.optimize import minimize, fmin
+from collections import defaultdict
+from scipy.stats import poisson
 
 def NMod(Vector,n=1):
     # Takes vector and returns n*mod
@@ -29,7 +29,7 @@ def tau(x,y,lamb,mu,rho):
     else:
         return 1
 
-def phi(t,eps = 0.0025):
+def phi(t,eps = 0):
     # Define the weight function
     return np.exp(-eps*t)
 
@@ -415,7 +415,7 @@ def Optimise2(Match_Data, Teams, Parameters = None):
 
   return Results
 
-def ProbMatrix(HomeTeam, AwayTeam, Parameters, gamma, rho, Teams,Max = 7):
+def ProbMatrix(HomeTeam, AwayTeam, Parameters, gamma, rho, Teams,Max = 10,RealMadridAttackChange=0, RealMadridDefenceChange = 0):
       # Function which takes two teams and returns a scoreline probability matrix.
       # Parameters is the set of parameters we have after running the Optimise function
       # Max is the maximum number of goals we assume any team can score in a game.     
@@ -432,6 +432,22 @@ def ProbMatrix(HomeTeam, AwayTeam, Parameters, gamma, rho, Teams,Max = 7):
       lamb = ai*bj*gamma
       mu = aj*bi
       
+      # Change parameters if Real Madrid
+      if HomeTeam == 'Real Madrid' or AwayTeam == 'Real Madrid':
+          if not(RealMadridAttackChange ==0):          
+              if HomeTeam == 'Real Madrid':
+                  lamb += RealMadridAttackChange
+              else:
+                  mu += RealMadridAttackChange             
+          elif not(RealMadridDefenceChange ==0):
+              if HomeTeam == 'Real Madrid':
+                  mu += RealMadridDefenceChange
+              else:
+                  lamb += RealMadridDefenceChange
+              # Check greater than 0
+              mu = max(0,mu)
+              lamb = max(0,lamb)
+                   
       # Making the scoreline probability matrix, without the tau function at first
       Result = np.outer(poisson.pmf(np.arange(0,Max +1), lamb), poisson.pmf(np.arange(0,Max +1), mu))
       
@@ -452,18 +468,103 @@ def HG(n,Max):
 def AG(n,Max, HomeG):
     return n - HomeG*(Max+1)
 
-def SimulateMatch(HomeTeam, AwayTeam, Parameters, gamma, rho, Teams,Max = 7):
+def SimulateMatch(HomeTeam, AwayTeam, Parameters, gamma, rho, Teams,Max = 10,RealMadridAttackChange=0, RealMadridDefenceChange = 0):
             
-    PMatrix = ProbMatrix(HomeTeam, AwayTeam, Parameters, gamma, rho,Teams, Max)
+    PMatrix = ProbMatrix(HomeTeam, AwayTeam, Parameters, gamma, rho,Teams, Max,RealMadridAttackChange, RealMadridDefenceChange )
     RandomNumber = np.random.uniform()
     c = np.cumsum(PMatrix)
     n = np.argmax(c>RandomNumber) # Checking which bin we are in
     HomeG = HG(n,Max)
     AwayG = AG(n,Max, HomeG)
-    return HomeTeam + ' ' + str(int(HomeG)) + ' - ' + str(int(AwayG)) + ' ' + AwayTeam
+    return [HomeG, AwayG]
 
 def Prob(PMatrix, HomeTeam, AwayTeam):
     AW = np.sum(np.triu(PMatrix,1))   
     Draw = np.trace(PMatrix)
     HW = np.sum(PMatrix) - Draw - AW
     return HomeTeam + ': ' + str(HW) + ' Draw: ' + str(Draw) + ' ' + AwayTeam + ': ' + str(AW)
+
+def simulate_one_season(Teams, Parameters, gamma, rho,Max = 10,RealMadridAttackChange=0, RealMadridDefenceChange = 0):
+
+    # Update result data in dicts - faster than updating a DataFrame.
+    points = defaultdict(int)
+    wins = defaultdict(int)
+    draws = defaultdict(int)
+    losses = defaultdict(int)
+    goals_for = defaultdict(int)
+    goals_against = defaultdict(int)
+
+    games_played = 0
+    # Simulate all the games in a season
+    for home_team in Teams:
+        for away_team in Teams:
+            if home_team == away_team:
+                continue
+            games_played += 1
+                
+            
+            GameResult = SimulateMatch(home_team, away_team, Parameters, gamma, rho, Teams,Max,RealMadridAttackChange, RealMadridDefenceChange)
+            home_goals = GameResult[0]
+            away_goals = GameResult[1]
+            
+            # Update the points and win/draw/loss statistics.
+            if home_goals > away_goals:
+                points[home_team] += 3
+                wins[home_team] += 1
+                losses[away_team] += 1
+            elif home_goals == away_goals:
+                points[home_team] += 1
+                points[away_team] += 1
+                draws[home_team] += 1
+                draws[away_team] += 1
+            else:
+                points[away_team] += 3
+                wins[away_team] += 1
+                losses[home_team] += 1
+            
+            # Update the goals.
+            goals_for[home_team] += home_goals
+            goals_against[home_team] += away_goals
+            
+            goals_for[away_team] += away_goals
+            goals_against[away_team] += home_goals
+           
+    # Return the table as a DataFrame (needs to be sorted on points and goal diff).
+    
+    # Build the empty table
+    empty_rows = np.zeros((20,7), dtype=int)
+    season_table_values = pd.DataFrame(empty_rows, columns=['points', 'wins', 'draws', 'losses', 'goals for', 'goals against', 'goal diff'])
+    season_table_teams = pd.DataFrame(Teams,columns=['team'])
+    season_table = pd.concat([season_table_teams, season_table_values], axis=1)
+    
+    # Fill in the table
+    for team in Teams:
+        values_list = [points[team], wins[team], draws[team], losses[team], goals_for[team], goals_against[team]]
+        season_table.loc[season_table.team == team, ['points', 'wins', 'draws', 'losses', 'goals for', 'goals against']] = values_list
+
+    # Calculate the goal diff.
+    season_table.loc[:, 'goal diff']= season_table.loc[:, 'goals for'] - season_table.loc[:, 'goals against']
+
+    return season_table.sort_values(['points', 'goal diff'], ascending=[False, False])
+
+
+def simulate_n_seasons(Teams, Parameters, gamma, rho,Max = 10, n=100, RealMadridAttackChange=0, RealMadridDefenceChange = 0):
+    # A negative value for ' RealMadridDefenceChange' makes their defence better
+    real_madrid_position_counts = defaultdict(int)
+    GoalsFor = 0
+    GoalsAgainst= 0
+    Losses = 0
+    Wins = 0
+    Draws = 0
+      
+    for i in range(n):
+        season_table = simulate_one_season(Teams, Parameters, gamma, rho,Max,RealMadridAttackChange, RealMadridDefenceChange)
+        real_madrid_position = list(season_table.loc[:, 'team']).index('Real Madrid') + 1  # First index is 0, therefore + 1.
+        real_madrid_position_counts[real_madrid_position] += 1
+        GoalsFor += season_table['goals for'][15]
+        GoalsAgainst += season_table['goals against'][15]
+        Losses += season_table['losses'][15]
+        Draws += season_table['draws'][15]
+        Wins += season_table['wins'][15]
+    
+    return (real_madrid_position_counts, GoalsFor/n, GoalsAgainst/n, Losses/n, Wins/n, Draws/n)
